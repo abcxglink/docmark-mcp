@@ -22,10 +22,11 @@ const CREDENTIALS_PATH = resolve(homedir(), ".docmark", "credentials.json");
 interface Credentials {
   api_key: string;
   hub_url: string;
-  org_id: string;
-  org_name: string;
-  org_slug: string;
   user_email: string;
+  // 後方互換: 旧形式の credentials にはこれらが含まれる
+  org_id?: string;
+  org_name?: string;
+  org_slug?: string;
 }
 
 async function loadCredentials(): Promise<Credentials | null> {
@@ -96,7 +97,7 @@ async function resolveProjectId(projectIdOrSlug: string, orgId: string): Promise
 
 const server = new McpServer({
   name: "docmark-mcp",
-  version: "0.3.0",
+  version: "0.4.0",
 });
 
 // --- list_organizations ---
@@ -124,32 +125,60 @@ server.tool(
 // --- list_projects ---
 server.tool(
   "list_projects",
-  "組織内のプロジェクト一覧を取得する",
-  { org_id: z.string().optional().describe("組織IDまたはslug（省略時はデフォルト組織）") },
+  "組織内のプロジェクト一覧を取得する。org_id を省略すると全所属組織のプロジェクトを返す",
+  { org_id: z.string().optional().describe("組織IDまたはslug（省略時は全所属組織）") },
   async ({ org_id }) => {
     const orgIdRaw = org_id ?? creds?.org_id;
-    if (!orgIdRaw) {
-      return { content: [{ type: "text" as const, text: "Error: org_id を指定してください（デフォルト組織が未設定です）" }] };
+    if (orgIdRaw) {
+      // 特定組織のプロジェクト一覧
+      let resolvedOrgId: string;
+      try {
+        resolvedOrgId = await resolveOrgId(orgIdRaw);
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }] };
+      }
+      const res = await api(`/api/orgs/${resolvedOrgId}/projects`);
+      if (!res.ok) {
+        const err = await res.json();
+        return { content: [{ type: "text" as const, text: `Error: ${err.error?.message ?? res.statusText}` }] };
+      }
+      const data = await res.json();
+      const lines = data.projects.map(
+        (p: { name: string; slug: string; id: string }) =>
+          `- ${p.name} (slug: ${p.slug}, id: ${p.id})`
+      );
+      return {
+        content: [{ type: "text" as const, text: lines.length > 0 ? lines.join("\n") : "プロジェクトがありません" }],
+      };
+    } else {
+      // 全所属組織のプロジェクトを取得
+      const orgsRes = await api("/api/orgs");
+      if (!orgsRes.ok) {
+        const err = await orgsRes.json();
+        return { content: [{ type: "text" as const, text: `Error: ${err.error?.message ?? orgsRes.statusText}` }] };
+      }
+      const orgsData = await orgsRes.json();
+      const orgs = orgsData.organizations as { id: string; name: string; slug: string }[];
+      if (orgs.length === 0) {
+        return { content: [{ type: "text" as const, text: "所属する組織がありません" }] };
+      }
+      const allLines: string[] = [];
+      for (const org of orgs) {
+        const res = await api(`/api/orgs/${org.id}/projects`);
+        if (!res.ok) continue;
+        const data = await res.json();
+        if (data.projects.length > 0) {
+          allLines.push(`## ${org.name}`);
+          for (const p of data.projects) {
+            allLines.push(`- ${p.name} (slug: ${p.slug}, id: ${p.id})`);
+          }
+          allLines.push("");
+        }
+      }
+      return {
+        content: [{ type: "text" as const, text: allLines.length > 0 ? allLines.join("\n") : "プロジェクトがありません" }],
+      };
     }
-    let resolvedOrgId: string;
-    try {
-      resolvedOrgId = await resolveOrgId(orgIdRaw);
-    } catch (e: any) {
-      return { content: [{ type: "text" as const, text: `Error: ${e.message}` }] };
-    }
-    const res = await api(`/api/orgs/${resolvedOrgId}/projects`);
-    if (!res.ok) {
-      const err = await res.json();
-      return { content: [{ type: "text" as const, text: `Error: ${err.error?.message ?? res.statusText}` }] };
-    }
-    const data = await res.json();
-    const lines = data.projects.map(
-      (p: { name: string; slug: string; id: string }) =>
-        `- ${p.name} (slug: ${p.slug}, id: ${p.id})`
-    );
-    return {
-      content: [{ type: "text" as const, text: lines.length > 0 ? lines.join("\n") : "プロジェクトがありません" }],
-    };
   }
 );
 
@@ -331,28 +360,47 @@ server.tool(
       };
     } else {
       let pidRaw = project_id ?? hubProjectId;
-      // project_id 未指定時、デフォルト組織にプロジェクトが1つだけなら自動選択
-      if (!pidRaw && creds?.org_id) {
+      // project_id 未指定時、全組織を検索してプロジェクトが1つだけなら自動選択
+      if (!pidRaw) {
         try {
-          const projRes = await api(`/api/orgs/${creds.org_id}/projects`);
-          if (projRes.ok) {
-            const projData = await projRes.json();
-            if (projData.projects.length === 1) {
-              pidRaw = projData.projects[0].id;
+          const orgsRes = await api("/api/orgs");
+          if (orgsRes.ok) {
+            const orgsData = await orgsRes.json();
+            const allProjects: { id: string; name: string; slug: string }[] = [];
+            for (const org of orgsData.organizations) {
+              const projRes = await api(`/api/orgs/${org.id}/projects`);
+              if (projRes.ok) {
+                const projData = await projRes.json();
+                allProjects.push(...projData.projects);
+              }
+            }
+            if (allProjects.length === 1) {
+              pidRaw = allProjects[0].id;
             }
           }
         } catch { /* ignore */ }
       }
       if (!pidRaw) {
         return {
-          content: [{ type: "text" as const, text: "Error: project_id が必要です。フロントマターに hub_project_id がないため、project_id パラメータを指定してください。" }],
+          content: [{ type: "text" as const, text: "Error: project_id が必要です。フロントマターに hub_project_id がないため、project_id パラメータを指定してください。\nlist_projects で確認できます。" }],
         };
       }
       let pid: string;
       try {
         if (!isUUID(pidRaw)) {
-          const defaultOrgId = creds?.org_id ?? "";
-          pid = await resolveProjectId(pidRaw, defaultOrgId);
+          // slug の場合、全組織から検索
+          const orgsRes = await api("/api/orgs");
+          if (!orgsRes.ok) throw new Error("組織一覧の取得に失敗しました");
+          const orgsData = await orgsRes.json();
+          let found: string | null = null;
+          for (const org of orgsData.organizations) {
+            try {
+              found = await resolveProjectId(pidRaw, org.id);
+              break;
+            } catch { /* try next org */ }
+          }
+          if (!found) throw new Error(`プロジェクト "${pidRaw}" が見つかりません`);
+          pid = found;
         } else {
           pid = pidRaw;
         }

@@ -54,7 +54,7 @@ export async function login(hubUrl?: string) {
 
       const data = await res.json();
 
-      // credentials を保存
+      // credentials を保存（組織非依存）
       await mkdir(CREDENTIALS_DIR, { recursive: true });
       await writeFile(
         CREDENTIALS_PATH,
@@ -62,9 +62,6 @@ export async function login(hubUrl?: string) {
           {
             api_key: data.key,
             hub_url: hub,
-            org_id: data.org_id,
-            org_name: data.org_name,
-            org_slug: data.org_slug,
             user_email: data.user_email,
           },
           null,
@@ -75,7 +72,6 @@ export async function login(hubUrl?: string) {
 
       console.log("");
       console.log(`✓ ログインしました (${data.user_email})`);
-      console.log(`  組織: ${data.org_name} (${data.org_slug})`);
       console.log(`  保存先: ${CREDENTIALS_PATH}`);
       return;
     } catch {
