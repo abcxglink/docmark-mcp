@@ -343,10 +343,13 @@ server.tool(
     }
 
     if (hubDocId) {
+      // content から H1 タイトルを抽出（更新時にタイトルも同期）
+      const h1Match = content.match(/^#\s+(.+)$/m);
+      const updatedTitle = h1Match ? h1Match[1].trim() : title;
       const res = await api(`/api/documents/${hubDocId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content, commit_message }),
+        body: JSON.stringify({ content, commit_message, title: updatedTitle }),
       });
       if (!res.ok) {
         const err = await res.json();
